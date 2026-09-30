@@ -20,6 +20,57 @@ M=$'\033[1;35m'; C=$'\033[1;36m'; W=$'\033[1;37m'; N=$'\033[0m'
 say() { printf '\n%s==> %s%s\n' "$C" "$*" "$N"; }
 err() { printf '%s%s%s\n' "$R" "$*" "$N"; }
 
+# ---------- loading animations ----------
+trap 'tput cnorm 2>/dev/null' EXIT
+trap 'echo; exit 130' INT
+
+if [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" == *[Uu][Tt][Ff]* ]]; then
+  FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); FULL="█"; EMPTY="░"; OKM="✔"; BADM="✘"
+else
+  FRAMES=('-' '\' '|' '/');       FULL="#"; EMPTY="-"; OKM="OK"; BADM="X"
+fi
+
+# spinner <pid> <message>  - animates while the process is running
+spinner() {
+  local i=0
+  tput civis 2>/dev/null
+  while kill -0 "$1" 2>/dev/null; do
+    printf '\r  %s%s%s %s' "$C" "${FRAMES[i++ % ${#FRAMES[@]}]}" "$N" "$2"
+    sleep 0.1
+  done
+  printf '\r\033[K'
+  tput cnorm 2>/dev/null
+}
+
+# run_spin <message> <command...>  - quiet (non-interactive) commands only
+run_spin() {
+  local msg="$1"; shift
+  "$@" </dev/null >/tmp/utk-run.log 2>&1 &
+  local pid=$!
+  spinner "$pid" "$msg"
+  wait "$pid"; local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$msg"
+  else
+    printf '  %s%s%s %s (log: /tmp/utk-run.log)\n' "$R" "$BADM" "$N" "$msg"
+  fi
+  return "$rc"
+}
+
+# loading_bar <message> [delay-per-step]
+loading_bar() {
+  local msg="${1:-Loading}" delay="${2:-0.03}" width=30 i f e
+  tput civis 2>/dev/null
+  for ((i = 0; i <= width; i++)); do
+    printf -v f '%*s' "$i" ''; f=${f// /$FULL}
+    printf -v e '%*s' "$((width - i))" ''; e=${e// /$EMPTY}
+    printf '\r  %s%s%s [%s%s%s%s%s] %3d%%' "$W" "$msg" "$N" "$G" "$f" "$B" "$e" "$N" "$((i * 100 / width))"
+    sleep "$delay"
+  done
+  printf '\r\033[K'
+  tput cnorm 2>/dev/null
+}
+
 need_panel_dir() {
   cd "$PANEL_DIR" 2>/dev/null || { err "Panel folder not found: $PANEL_DIR (set PANEL_DIR=...)"; return 1; }
 }
@@ -29,7 +80,10 @@ install_panel() {
   echo -e "${Y}NOTE: --reset wipes and reinstalls the panel setup.${N}"
   read -rp "Continue? (yes/no): " ok
   [[ "$ok" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo "Cancelled."; return 1; }
-  bash <(curl -fsSL "$PETRO_URL") --reset
+  local tmp; tmp="$(mktemp)"
+  run_spin "Downloading panel installer" curl -fsSL "$PETRO_URL" -o "$tmp" || { rm -f "$tmp"; return 1; }
+  bash "$tmp" --reset
+  rm -f "$tmp"
 }
 
 install_nebula() {
@@ -44,7 +98,8 @@ install_nebula() {
 
 panel_script() {  # $1=url  $2=name
   need_panel_dir || return 1
-  docker compose exec panel sh -c "curl -fsSL '$1' -o /tmp/$2.sh && bash /tmp/$2.sh"
+  run_spin "Downloading $2 script" docker compose exec -T panel sh -c "curl -fsSL '$1' -o /tmp/$2.sh" || return 1
+  docker compose exec panel bash "/tmp/$2.sh"
 }
 
 install_nobita() { say "Nobita themes & extensions"; panel_script "$NOBITA_URL" nobita; }
@@ -52,7 +107,8 @@ install_jishnu() { say "Jishnu themes & extensions"; panel_script "$JISHNU_URL" 
 
 install_playit() {
   say "playit.gg"
-  curl -fsSL "$PLAYIT_URL" -o "$HOME/playit-install.sh" && bash "$HOME/playit-install.sh"
+  run_spin "Downloading playit installer" curl -fsSL "$PLAYIT_URL" -o "$HOME/playit-install.sh" || return 1
+  bash "$HOME/playit-install.sh"
 }
 
 run_all() {
@@ -66,30 +122,47 @@ run_all() {
   say "Done."
 }
 
+banner() {
+  printf '%s' "$C"
+  cat <<'ART'
+ _   _  _____  _  __    _     ____   ____   _   _ 
+| | | ||_   _|| |/ /   / \   |  _ \ / ___| | | | |
+| | | |  | |  | ' /   / _ \  | |_) |\___ \ | |_| |
+| |_| |  | |  | . \  / ___ \ |  _ < ___) ||  _  |
+ \___/   |_|  |_|\_\/_/   \_\|_| \_\|____/ |_| |_|
+ART
+  printf '%s\n' "$N"
+  echo -e "   ${W}Pterodactyl Panel + Wings + Cloudflare${N}  ${M}|${N}  ${Y}installer by Utkarsh${N}"
+  echo -e "   ${B}----------------------------------------------------${N}"
+  echo
+}
+
+pause() { echo; read -rp "  Press Enter to return to the menu... " _; }
+
 menu() {
+  clear
+  loading_bar "Loading installer" 0.02
   while true; do
+    clear
+    banner
+    echo -e "   ${G}1)${N} Panel + Blueprint + Cloudflare + Wings"
+    echo -e "   ${G}2)${N} Nebula theme"
+    echo -e "   ${Y}3)${N} Nobita themes & extensions"
+    echo -e "   ${Y}4)${N} Jishnu themes & extensions"
+    echo -e "   ${B}5)${N} playit.gg"
+    echo -e "   ${M}6)${N} Run all ${C}(1 -> 2 -> extensions -> playit)${N}"
+    echo -e "   ${R}0)${N} Exit"
     echo
-    echo -e "${M}  ╔═══════════════════════════════════════╗${N}"
-    echo -e "${M}  ║${C}      ⚡  UTKARSH PANEL INSTALLER  ⚡      ${M}║${N}"
-    echo -e "${M}  ╚═══════════════════════════════════════╝${N}"
-    echo -e "  ${G}1)${N} ${W}Panel + Blueprint + Cloudflare + Wings${N}"
-    echo -e "  ${G}2)${N} ${W}Nebula theme${N}"
-    echo -e "  ${Y}3)${N} ${W}Nobita themes & extensions${N}"
-    echo -e "  ${Y}4)${N} ${W}Jishnu themes & extensions${N}"
-    echo -e "  ${B}5)${N} ${W}playit.gg${N}"
-    echo -e "  ${M}6)${N} ${W}Run all${N} ${C}(1 → 2 → extensions → playit)${N}"
-    echo -e "  ${R}0)${N} ${W}Exit${N}"
-    echo
-    read -rp "  ${C}Choose:${N} " c
+    read -rp "   Choose [0-6]: " c
     case "$c" in
-      1) install_panel ;;
-      2) install_nebula ;;
-      3) install_nobita ;;
-      4) install_jishnu ;;
-      5) install_playit ;;
-      6) run_all ;;
+      1) loading_bar "Preparing" ; install_panel;  pause ;;
+      2) loading_bar "Preparing" ; install_nebula; pause ;;
+      3) loading_bar "Preparing" ; install_nobita; pause ;;
+      4) loading_bar "Preparing" ; install_jishnu; pause ;;
+      5) loading_bar "Preparing" ; install_playit; pause ;;
+      6) loading_bar "Preparing" ; run_all;        pause ;;
       0) exit 0 ;;
-      *) err "Invalid choice" ;;
+      *) err "Invalid choice"; sleep 1 ;;
     esac
   done
 }
