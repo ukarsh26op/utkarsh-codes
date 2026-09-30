@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Utkarsh Panel - all-in-one installer
+# Usage:
+#   bash <(curl -fsSL https://YOUR-SHORT-URL/)          # menu
+#   bash <(curl -fsSL https://YOUR-SHORT-URL/) all      # run everything
+#   bash <(curl -fsSL https://YOUR-SHORT-URL/) panel|nebula|nobita|jishnu|playit
+set -uo pipefail
+
+PANEL_DIR="${PANEL_DIR:-$HOME/pterodactyl}"   # folder with docker-compose.yml
+
+PETRO_URL="https://raw.githubusercontent.com/ukarsh26op/utkarsh-panel-install.sh/refs/heads/main/petro-install.sh"
+PLAYIT_URL="https://raw.githubusercontent.com/ukarsh26op/playitt.gg/refs/heads/main/playit.gg%20install.sh"
+NOBITA_URL="https://ptero.nobitahost.in/"
+JISHNU_URL="https://codes.jishnu.site/"
+NEBULA_CMD=""   # <- paste your Nebula install command here
+
+say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+err() { printf '\033[1;31m%s\033[0m\n' "$*"; }
+
+need_panel_dir() {
+  cd "$PANEL_DIR" 2>/dev/null || { err "Panel folder not found: $PANEL_DIR (set PANEL_DIR=...)"; return 1; }
+}
+
+install_panel() {
+  say "Panel + Blueprint + Cloudflare + Wings"
+  echo "NOTE: --reset wipes and reinstalls the panel setup."
+  read -rp "Type YES to continue: " ok
+  [ "$ok" = "YES" ] || { echo "Cancelled."; return 1; }
+  bash <(curl -fsSL "$PETRO_URL") --reset
+}
+
+install_nebula() {
+  say "Nebula theme"
+  if [ -z "$NEBULA_CMD" ]; then
+    err "Nebula command is empty. Edit NEBULA_CMD in this script."
+    return 1
+  fi
+  need_panel_dir || return 1
+  bash -c "$NEBULA_CMD"
+}
+
+panel_script() {  # $1=url  $2=name
+  need_panel_dir || return 1
+  docker compose exec panel sh -c "curl -fsSL '$1' -o /tmp/$2.sh && bash /tmp/$2.sh"
+}
+
+install_nobita() { say "Nobita themes & extensions"; panel_script "$NOBITA_URL" nobita; }
+install_jishnu() { say "Jishnu themes & extensions"; panel_script "$JISHNU_URL" jishnu; }
+
+install_playit() {
+  say "playit.gg"
+  curl -fsSL "$PLAYIT_URL" -o "$HOME/playit-install.sh" && bash "$HOME/playit-install.sh"
+}
+
+run_all() {
+  install_panel  || return
+  install_nebula
+  echo
+  read -rp "Extensions: 1) Nobita  2) Jishnu  3) Skip  [1/2/3]: " e
+  case "$e" in 1) install_nobita ;; 2) install_jishnu ;; esac
+  read -rp "Install playit.gg too? [y/N]: " p
+  [[ "$p" =~ ^[Yy]$ ]] && install_playit
+  say "Done."
+}
+
+menu() {
+  while true; do
+    cat <<'EOF'
+
+  ===== Utkarsh Panel Installer =====
+  1) Panel + Blueprint + Cloudflare + Wings
+  2) Nebula theme
+  3) Nobita themes & extensions
+  4) Jishnu themes & extensions
+  5) playit.gg
+  6) Run all (1 -> 2 -> extensions -> playit)
+  0) Exit
+EOF
+    read -rp "  Choose: " c
+    case "$c" in
+      1) install_panel ;;
+      2) install_nebula ;;
+      3) install_nobita ;;
+      4) install_jishnu ;;
+      5) install_playit ;;
+      6) run_all ;;
+      0) exit 0 ;;
+      *) err "Invalid choice" ;;
+    esac
+  done
+}
+
+case "${1:-menu}" in
+  menu)   menu ;;
+  all)    run_all ;;
+  panel)  install_panel ;;
+  nebula) install_nebula ;;
+  nobita) install_nobita ;;
+  jishnu) install_jishnu ;;
+  playit) install_playit ;;
+  *) err "Unknown option: $1"; exit 1 ;;
+esac
