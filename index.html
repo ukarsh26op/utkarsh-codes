@@ -4,6 +4,13 @@
 #   bash <(curl -fsSL https://YOUR-SHORT-URL/)          # menu
 #   bash <(curl -fsSL https://YOUR-SHORT-URL/) all      # run everything
 #   bash <(curl -fsSL https://YOUR-SHORT-URL/) panel|nebula|nobita|jishnu|playit
+# This script needs bash (zsh/sh handle `read -p` and arrays differently)
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "Please run this installer with bash:"
+  echo "  bash <(curl -fsSL https://utkarsh-sh.install-sh.workers.dev)"
+  return 1 2>/dev/null || exit 1
+fi
+
 set -uo pipefail
 
 PANEL_DIR="${PANEL_DIR:-$HOME/pterodactyl}"   # folder with docker-compose.yml
