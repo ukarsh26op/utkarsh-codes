@@ -3,7 +3,7 @@
 # Usage:
 #   bash <(curl -fsSL https://YOUR-SHORT-URL/)          # menu
 #   bash <(curl -fsSL https://YOUR-SHORT-URL/) all      # run everything
-#   bash <(curl -fsSL https://YOUR-SHORT-URL/) panel|nebula|nobita|jishnu|playit
+#   bash <(curl -fsSL https://YOUR-SHORT-URL/) panel|nebula|nobita|jishnu|playit|repair|repair-wings
 # This script needs bash (zsh/sh handle `read -p` and arrays differently)
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "Please run this installer with bash:"
@@ -82,6 +82,98 @@ need_panel_dir() {
   cd "$PANEL_DIR" 2>/dev/null || { err "Panel folder not found: $PANEL_DIR (set PANEL_DIR=...)"; return 1; }
 }
 
+# ---------- Repair / restart (keeps all data) ----------
+# Fixes cases like: Cloudflare tunnel connected but panel shows 502 because
+# a container is stuck (e.g. "RWLayer of container ... is unexpectedly nil").
+# Only CONTAINERS are removed - volumes (database + panel files) are kept.
+repair_panel() {
+  say "Repair / start panel (keeps your data)"
+  need_panel_dir || return 1
+
+  if ! docker compose up -d; then
+    err "compose up failed, removing stale containers (volumes are kept) and retrying..."
+    local proj ids
+    proj="$(basename "$PANEL_DIR")"
+    ids="$(docker ps -aq --filter "label=com.docker.compose.project=${proj}" 2>/dev/null || true)"
+    [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
+    docker compose up -d || { err "Still failing. Check: cd $PANEL_DIR && docker compose logs --tail=60"; return 1; }
+  fi
+
+  # make sure the Cloudflare tunnel container is up too
+  if docker ps -a --format '{{.Names}}' | grep -qx 'utkarsh-cloudflared'; then
+    docker start utkarsh-cloudflared >/dev/null 2>&1 || true
+  fi
+
+  printf '  Waiting for the panel on port 80 '
+  local i code
+  for i in $(seq 1 40); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:80/auth/login || true)"
+    if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+      printf '\n  %s%s%s Panel is answering (HTTP %s)\n' "$G" "$OKM" "$N" "$code"
+      return 0
+    fi
+    printf '.'; sleep 3
+  done
+  printf '\n'
+  err "Panel not answering yet. Check: cd $PANEL_DIR && docker compose logs --tail=60 panel"
+  return 1
+}
+
+# ---------- Repair / restart Wings (keeps all data) ----------
+# Fixes Wings not coming back after a restart (tunnel up, wings domain 502):
+# stale pid, stuck/broken containers (e.g. "RWLayer ... is unexpectedly nil"),
+# or a missing pterodactyl_nw network. Server files live in
+# $WINGS_DIR/var/lib/pterodactyl/volumes, NOT in containers, so removing
+# stopped containers is safe - Wings recreates them when a server starts.
+WINGS_DIR="${WINGS_DIR:-$HOME/wings}"
+
+repair_wings() {
+  say "Repair / restart Wings (keeps your data)"
+  local ctl="$WINGS_DIR/wings-ctl.sh"
+  [ -x "$ctl" ] || { err "Wings is not installed ($ctl missing). Install Wings first."; return 1; }
+
+  if ! docker info >/dev/null 2>&1; then
+    err "Docker is not running / not accessible. Start Docker first, then retry."
+    return 1
+  fi
+
+  "$ctl" stop >/dev/null 2>&1 || true
+
+  # remove stuck / stopped containers on the wings network (data is kept)
+  local ids
+  ids="$(docker ps -aq --filter network=pterodactyl_nw \
+          --filter status=created --filter status=dead --filter status=exited 2>/dev/null || true)"
+  if [ -n "$ids" ]; then
+    echo "  Removing stale containers..."
+    docker rm -f $ids >/dev/null 2>&1 || true
+  fi
+
+  # make sure the wings docker network exists
+  if ! docker network inspect pterodactyl_nw >/dev/null 2>&1; then
+    echo "  Recreating network pterodactyl_nw..."
+    docker network create --driver bridge --subnet 172.18.0.0/16 --gateway 172.18.0.1 pterodactyl_nw >/dev/null 2>&1 \
+      || err "Could not create pterodactyl_nw (Wings will try itself)"
+  fi
+
+  # make sure the Cloudflare tunnel container is up too
+  if docker ps -a --format '{{.Names}}' | grep -qx 'utkarsh-cloudflared'; then
+    docker start utkarsh-cloudflared >/dev/null 2>&1 || true
+  fi
+
+  if ! "$ctl" start; then
+    err "Wings failed to start. Check: $ctl logs"
+    return 1
+  fi
+
+  local code
+  code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/system || true)"
+  if [ -z "$code" ] || [ "$code" = "000" ]; then
+    err "Wings process is up but the API on port 8080 is not answering. Check: $ctl logs"
+    return 1
+  fi
+  printf '  %s%s%s Wings API is responding (HTTP %s; 401 is normal)\n' "$G" "$OKM" "$N" "$code"
+}
+
 install_panel() {
   say "Panel + Blueprint + Cloudflare + Wings"
   echo -e "${Y}NOTE: --reset wipes and reinstalls the panel setup.${N}"
@@ -158,9 +250,11 @@ menu() {
     echo -e "   ${Y}4)${N} Jishnu themes & extensions"
     echo -e "   ${B}5)${N} playit.gg"
     echo -e "   ${M}6)${N} Run all ${C}(1 -> 2 -> extensions -> playit)${N}"
+    echo -e "   ${G}7)${N} Repair / restart panel ${C}(keeps data)${N}"
+    echo -e "   ${G}8)${N} Repair / restart Wings ${C}(keeps data)${N}"
     echo -e "   ${R}0)${N} Exit"
     echo
-    read -rp "   Choose [0-6]: " c
+    read -rp "   Choose [0-8]: " c
     case "$c" in
       1) loading_bar "Preparing" ; install_panel;  pause ;;
       2) loading_bar "Preparing" ; install_nebula; pause ;;
@@ -168,6 +262,8 @@ menu() {
       4) loading_bar "Preparing" ; install_jishnu; pause ;;
       5) loading_bar "Preparing" ; install_playit; pause ;;
       6) loading_bar "Preparing" ; run_all;        pause ;;
+      7) loading_bar "Preparing" ; repair_panel;   pause ;;
+      8) loading_bar "Preparing" ; repair_wings;   pause ;;
       0) exit 0 ;;
       *) err "Invalid choice"; sleep 1 ;;
     esac
@@ -182,5 +278,7 @@ case "${1:-menu}" in
   nobita) install_nobita ;;
   jishnu) install_jishnu ;;
   playit) install_playit ;;
+  repair) repair_panel ;;
+  repair-wings) repair_wings ;;
   *) err "Unknown option: $1"; exit 1 ;;
 esac
